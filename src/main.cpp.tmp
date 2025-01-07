@@ -1,0 +1,302 @@
+#include <Arduino.h>
+//#include <DShotRMT.h>
+#include <DShotESC.h>
+#include <Wire.h>
+
+
+// Define the GPIO pins connected to the motors in an array
+const int NUM_MOTORS = 4;
+const gpio_num_t MOTOR_PINS[NUM_MOTORS] = {GPIO_NUM_12, GPIO_NUM_13, GPIO_NUM_14, GPIO_NUM_27};
+const rmt_channel_t MOTOR_CHANNELS[NUM_MOTORS] = {RMT_CHANNEL_0, RMT_CHANNEL_1, RMT_CHANNEL_2, RMT_CHANNEL_3};
+int throttle_values[NUM_MOTORS];
+// Define an array of DShotESC objects	
+DShotESC esc[NUM_MOTORS];
+
+// Overall ESC settings
+#define MIN_THROTTLE 9
+// Define the failsafe and initial throttle values
+const auto FAILSAFE_THROTTLE = 0;
+const auto INITIAL_THROTTLE = 48;
+
+// Define the acceleration values
+int accel_rate = 10;
+int current_speed[NUM_MOTORS];
+int target_speed[NUM_MOTORS];
+
+// Used for example sketch sine wave
+#define PEAKSPEED 100
+#define SINE_DURATION 10000.f //duration of the full cycle, in millis
+
+// Wire communication with I2C
+//static array to store the input buffer
+const int address = 0x04;
+char input_buffer[10];
+
+bool DEMO_MODE = false;
+
+
+bool SHOW_UPDATE = false;
+int last_print_time = 0;
+int print_rate = 500;
+
+uint32_t isrCount = 0, isrTime = 0;
+bool update_ok = false;
+
+// Hardware timer for control updates
+hw_timer_t * timer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+volatile SemaphoreHandle_t timerSemaphore;
+
+volatile uint32_t isrCounter = 0;
+volatile uint32_t lastIsrAt = 0;
+volatile bool _update_ok = false;
+
+
+int map_throttle(int throttle) {
+	if( throttle < MIN_THROTTLE) return 0;
+	return throttle;
+}
+
+void write_throttles() {
+	for(int i = 0; i < NUM_MOTORS; i++) {
+		throttle_values[i] = map_throttle(current_speed[i]);
+	}
+}
+
+void rawUpdate() {
+	for(int i = 0; i < NUM_MOTORS; i++) {
+		esc[i].sendThrottle(map_throttle(current_speed[i]));
+	}
+}
+
+void ARDUINO_ISR_ATTR onTimer() {
+  // Increment the counter and set the time of ISR
+  portENTER_CRITICAL_ISR(&timerMux);
+  _update_ok = false;
+  for(int i = 0; i < NUM_MOTORS; i++) {
+	esc[i].sendThrottle(map_throttle(current_speed[i]));
+  }
+  _update_ok = true;
+  isrCounter = isrCounter + 1;
+  lastIsrAt = millis();
+  portEXIT_CRITICAL_ISR(&timerMux);
+  // Give a semaphore that we can check in the loop
+  xSemaphoreGiveFromISR(timerSemaphore, NULL);
+  // It is safe to use digitalRead/Write here if you want to toggle an output
+}
+
+void set_demo_mode(bool demo_mode) {
+	DEMO_MODE = demo_mode;
+	Serial.println("Setting demo mode to " + String(demo_mode));
+}
+
+void set_speed(int motor_id, int speed) {
+	target_speed[motor_id] = speed;
+	Serial.println("Setting speed for motor " + String(motor_id) + " to " + String(speed));
+}
+
+void set_acceleration(int acceleration) {
+	accel_rate = acceleration;
+	Serial.println("Setting max acceleration to " + String(acceleration) + " steps per loop");
+}
+
+void emergencyStop() {
+	for(int i = 0; i < NUM_MOTORS; i++) {
+		esc[i].sendThrottle(FAILSAFE_THROTTLE);
+		current_speed[i] = FAILSAFE_THROTTLE;
+		target_speed[i] = FAILSAFE_THROTTLE;
+	}
+	Serial.println("Emergency stop");
+}
+
+
+
+void handle_wire_input() {
+	Serial.println("Handling input: " + String(input_buffer));
+	if(input_buffer[0] == 'S') { // Setting speedS 0 200
+
+		set_speed(input_buffer[1], input_buffer[2] * 256 + input_buffer[3]);
+	}
+	else if(input_buffer[0] == 'A') { // Set acceleration
+		set_acceleration(input_buffer[1] * 256 + input_buffer[2]);
+	}
+	else if(input_buffer[0] == 'D') {
+		set_demo_mode(input_buffer[1] == '1');
+	}
+	else if( input_buffer[0] == 'X') {
+		emergencyStop();
+	}
+}
+
+void receiveEvent(int howMany) {
+  int i = 0;
+  while(Wire.available()) {
+    char c = Wire.read();
+    Serial.print(c);
+    input_buffer[i] = c;
+    i++;
+  }
+  Serial.println("Received: " + String(input_buffer));
+  handle_wire_input();
+}
+
+void handle_serial_input() {
+	// Read a single byte from the Serial input
+	char command = Serial.read();
+	if(command == 'S') {
+		set_speed(Serial.parseInt(), Serial.parseInt());
+	}
+	else if(command == 'A') {
+		set_acceleration(Serial.parseInt());
+	}
+	else if(command == 'D') {
+		set_demo_mode(Serial.parseInt() == 1);
+	}
+	else if(command == 'X') {
+		emergencyStop();
+	}
+}
+
+
+
+void standardUpdate() {
+	if(SHOW_UPDATE) {
+		Serial.print("Throttle Values: " );
+	}
+	for(int i = 0; i < NUM_MOTORS; i++) {
+		if(current_speed[i] < target_speed[i]) {
+			current_speed[i] += accel_rate;
+			if(current_speed[i] > target_speed[i]) {
+				current_speed[i] = target_speed[i];
+			}
+		}
+		else if(current_speed[i] > target_speed[i]) {
+			current_speed[i] -= accel_rate;
+			if(current_speed[i] < target_speed[i]) {
+				current_speed[i] = target_speed[i];
+			}
+		}
+		if(SHOW_UPDATE) {
+			Serial.print( String(i) + ": " + String(current_speed[i]) + "[" + String(target_speed[i]) + "] ");
+		}
+	}
+	if(SHOW_UPDATE) {
+		Serial.println();
+	}
+}
+
+void demoUpdate() {
+	if(SHOW_UPDATE) {
+		Serial.print("Throttle Values: " );
+	}
+	for(int i = 0; i < NUM_MOTORS; i++) {
+		int16_t milliswrap = sin(millis()*2/SINE_DURATION*PI + (i*PI/2))*PEAKSPEED + PEAKSPEED;
+		current_speed[i] = milliswrap;
+		if(SHOW_UPDATE) {
+			Serial.print( String(i) + ": " + String(milliswrap) + " ");
+		}
+	}
+	if(SHOW_UPDATE) {
+		Serial.println();
+	}
+}
+
+void setup() {
+  	Serial.begin(115200);           // set up Serial library at 9600 bps
+  	while(!Serial) {};
+  	Serial.println("MotorControlAZ v1 - setting up ESCs");
+
+  	Serial.println("Installing ESCs");  
+  	for(int i = 0; i < NUM_MOTORS; i++) {
+		esc[i].install(MOTOR_PINS[i], MOTOR_CHANNELS[i]);
+		esc[i].init();
+		esc[i].setReversed(false);
+		esc[i].set3DMode(true);
+		current_speed[i] = 0;
+		target_speed[i] = 0;
+  	}
+	Serial.print("Arming ESCs: ");
+	for(int i = 0; i < NUM_MOTORS; i++) {
+		Serial.print(" esc" + String(i) + ": ");
+		Serial.print(esc[i].throttleArm(500));
+	}
+	Serial.println();
+	Serial.print("Beeping ESCs: ");
+	for (int b = 0; b < 5; b++)
+	{
+		Serial.print(String(b));
+		for(int i = 0; i < NUM_MOTORS; i++) {
+			esc[i].beep(b);
+		}
+		Serial.print(". ");
+		//delay(100);
+	}
+	Serial.println(" done.");
+	//delay(300);
+	Serial.println("ESCs ready");
+	//Serial.println("Setting up I2C");
+  	//Wire.begin(address);
+  	//Wire.onReceive(receiveEvent);
+
+ /*
+	timerSemaphore = xSemaphoreCreateBinary(); // Create semaphore to inform us when the timer has fired
+	timer = timerBegin(1000000); // Set timer frequency to 1Mhz
+	timerAttachInterrupt(timer, &onTimer); // Attach onTimer function to our timer.
+	// Set alarm to call onTimer function every second (value in microseconds).
+	// Repeat the alarm (third parameter) with unlimited count = 0 (fourth parameter).
+	timerAlarm(timer, 10000, true, 0);
+ */
+}
+
+void updateShouldPrint() {
+	if(millis() - last_print_time > print_rate) {
+		last_print_time = millis();
+		SHOW_UPDATE = true;
+	}
+	else {
+		SHOW_UPDATE = false;
+	}
+}
+
+
+void loop() {
+	updateShouldPrint();
+	// If Timer has fired
+	/*
+	if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE) {
+		// Read the interrupt count and time
+		portENTER_CRITICAL(&timerMux);
+		isrCount = isrCounter;
+		isrTime = lastIsrAt;
+		update_ok = _update_ok;
+		write_throttles();
+		portEXIT_CRITICAL(&timerMux);
+	}
+
+	if(SHOW_UPDATE) {
+		// Print it
+		Serial.print("On timer no. ");
+		Serial.print(isrCount);
+		Serial.print(" at ");
+		Serial.print(isrTime);
+		Serial.print(" ms. ");
+		Serial.println("Update ok: " + String(update_ok));
+	}
+	*/
+
+
+	demoUpdate();
+	rawUpdate();
+
+	//if( DEMO_MODE) demoUpdate();
+	//else standardUpdate();
+
+	// Check for Serial input and if so, handle it
+
+	//if(Serial.available()) {
+	//	handle_serial_input();
+	//}
+	delay(10);
+}
+
+
