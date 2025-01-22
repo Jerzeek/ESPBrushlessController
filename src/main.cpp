@@ -1,10 +1,18 @@
 #include <Arduino.h>
-// #include <DShotRMT.h>
 #include <DShotESC.h>
 #include <Wire.h>
 
-// Define the GPIO pin connected to the motor and the DShot protocol used
-const gpio_num_t MOTOR_PINS[] = {GPIO_NUM_12, GPIO_NUM_13, GPIO_NUM_14, GPIO_NUM_27};
+// Board-specific pin configurations
+#if defined(ARDUINO_ESP32_DEV)
+    const gpio_num_t MOTOR_PINS[] = {GPIO_NUM_26, GPIO_NUM_18, GPIO_NUM_19, GPIO_NUM_23};
+    #define BOARD_TYPE "ESP32 Dev Module"
+#elif defined(ARDUINO_ESP32_THING)
+    const gpio_num_t MOTOR_PINS[] = {GPIO_NUM_12, GPIO_NUM_13, GPIO_NUM_14, GPIO_NUM_27};
+    #define BOARD_TYPE "ESP32 Thing"
+#else
+    #error "Unsupported board type"
+#endif
+
 const rmt_channel_t RMT_CHANNELS[] = {RMT_CHANNEL_0, RMT_CHANNEL_1, RMT_CHANNEL_2, RMT_CHANNEL_3};
 
 DShotESC esc0;
@@ -190,7 +198,7 @@ void setup()
 	Serial.begin(115200); // set up Serial library at 9600 bps
 	while (!Serial) { };
 	//delay(500);
-	Serial.println("MotorControlAZ v1 - setting up ESCs");
+	Serial.println("MotorControl - setting up ESCs on " BOARD_TYPE);
 	// esc1.begin(DSHOT_MODE,NO_BIDIRECTION);
 	// esc2.begin(DSHOT_MODE,NO_BIDIRECTION);
 	// esc1.send_dshot_value(INITIAL_THROTTLE);
@@ -240,13 +248,20 @@ void setup()
 	}
  */
 	Serial.println("ESCs ready");
-	timerSemaphore = xSemaphoreCreateBinary(); // Create semaphore to inform us when the timer has fired
-	timer = timerBegin(1000000); // Set timer frequency to 1Mhz
-	timerAttachInterrupt(timer, &onTimer); // Attach onTimer function to our timer.
-	// Set alarm to call onTimer function every second (value in microseconds).
-	// Repeat the alarm (third parameter) with unlimited count = 0 (fourth parameter).
-	timerAlarm(timer, 10000, true, 0);
- 
+	timerSemaphore = xSemaphoreCreateBinary();
+
+	// Use timer 0, 80 divider for 1MHz frequency, count up
+	timer = timerBegin(0, 80, true);
+
+	// Attach onTimer function to our timer with edge type interrupt
+	timerAttachInterrupt(timer, &onTimer, true);
+
+	// Set alarm to call onTimer function every 10000 microseconds (10ms)
+	// Repeat the alarm (third parameter)
+	timerAlarmWrite(timer, 10000, true);
+
+	// Start the timer
+	timerAlarmEnable(timer);
 }
 
 int map_throttle(int throttle)
