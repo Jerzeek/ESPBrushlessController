@@ -38,3 +38,11 @@ Pinout
 | 8| N/C | 
 
 Type connector: ???
+
+## Commands
+Serial Interface
+
+`S [motor] [speed]`: Set motor speed (0-???)
+`A [rate]`: Set acceleration rate
+`D [0/1]`: Toggle demo mode
+`X`: Emergency stop

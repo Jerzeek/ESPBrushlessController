@@ -26,6 +26,10 @@ DShotESC esc7;
 DShotESC *escs[] = {&esc0, &esc1, &esc2, &esc3, &esc4, &esc5, &esc6, &esc7};
 const int NUM_MOTORS = 8;
 
+// Add previous state tracking
+int16_t previous_speed[NUM_MOTORS];
+bool values_changed = false;
+
 #define PEAKSPEED 50
 #define MIN_THROTTLE 9
 #define SINE_DURATION 10000.f // duration of the full cycle, in millis
@@ -35,7 +39,7 @@ const auto FAILSAFE_THROTTLE = 0;
 const auto INITIAL_THROTTLE = 48;
 
 bool DEMO_MODE = false;
-bool SHOW_UPDATE = true;
+bool SHOW_UPDATE = false;
 int accel_rate = 1;
 
 int last_print_time = 0;
@@ -145,45 +149,61 @@ void handle_serial_input() {
 
 
 void standardUpdate() {
-	if(SHOW_UPDATE) {
-		Serial.print("Throttle Values: " );
-	}
-	for(int i = 0; i < NUM_MOTORS; i++) {
-		if(current_speed[i] < target_speed[i]) {
-			current_speed[i] += accel_rate;
-			if(current_speed[i] > target_speed[i]) {
-				current_speed[i] = target_speed[i];
-			}
-		}
-		else if(current_speed[i] > target_speed[i]) {
-			current_speed[i] -= accel_rate;
-			if(current_speed[i] < target_speed[i]) {
-				current_speed[i] = target_speed[i];
-			}
-		}
-		if(SHOW_UPDATE) {
-			Serial.print( String(i) + ": " + String(current_speed[i]) + "[" + String(target_speed[i]) + "] ");
-		}
-	}
-	if(SHOW_UPDATE) {
-		Serial.println();
-	}
+    values_changed = false;
+    static bool last_update_printed = false;
+    bool target_reached = true;
+    
+    for(int i = 0; i < NUM_MOTORS; i++) {
+        int16_t old_speed = current_speed[i];
+        if(current_speed[i] < target_speed[i]) {
+            current_speed[i] += accel_rate;
+            if(current_speed[i] > target_speed[i]) {
+                current_speed[i] = target_speed[i];
+            }
+            target_reached = false;
+        }
+        else if(current_speed[i] > target_speed[i]) {
+            current_speed[i] -= accel_rate;
+            if(current_speed[i] < target_speed[i]) {
+                current_speed[i] = target_speed[i];
+            }
+            target_reached = false;
+        }
+        if(old_speed != current_speed[i]) {
+            values_changed = true;
+            last_update_printed = false;
+        }
+    }
+    
+    if((values_changed || (target_reached && !last_update_printed)) && SHOW_UPDATE) {
+        Serial.print("Throttle Values: ");
+        for(int i = 0; i < NUM_MOTORS; i++) {
+            Serial.print(String(i) + ": " + String(current_speed[i]) + "[" + String(target_speed[i]) + "] ");
+        }
+        Serial.println();
+        last_update_printed = true;
+    }
 }
 
 void demoUpdate() {
-	if(SHOW_UPDATE) {
-		Serial.print("Throttle Values: " );
-	}
-	for(int i = 0; i < NUM_MOTORS; i++) {
-		int16_t milliswrap = sin(millis()*2/SINE_DURATION*PI + (i*PI/2))*PEAKSPEED + PEAKSPEED;
-		current_speed[i] = milliswrap;
-		if(SHOW_UPDATE) {
-			Serial.print( String(i) + ": " + String(milliswrap) + " ");
-		}
-	}
-	if(SHOW_UPDATE) {
-		Serial.println();
-	}
+    values_changed = false;
+    if(SHOW_UPDATE) {
+        for(int i = 0; i < NUM_MOTORS; i++) {
+            int16_t milliswrap = sin(millis()*2/SINE_DURATION*PI + (i*PI/2))*PEAKSPEED + PEAKSPEED;
+            if(milliswrap != current_speed[i]) {
+                values_changed = true;
+                current_speed[i] = milliswrap;
+            }
+        }
+        
+        if(values_changed) {
+            Serial.print("Throttle Values: ");
+            for(int i = 0; i < NUM_MOTORS; i++) {
+                Serial.print(String(i) + ": " + String(current_speed[i]) + " ");
+            }
+            Serial.println();
+        }
+    }
 }
 
 
@@ -262,18 +282,20 @@ void setup()
 	}
  */
 	Serial.println("ESCs ready");
-	Serial.println("Setting up timer");
-	timerSemaphore = xSemaphoreCreateBinary(); // Create semaphore to inform us when the timer has fired
-	timer = timerBegin(1000000); // Set timer frequency to 1Mhz
-	timerAttachInterrupt(timer, &onTimer); // Attach onTimer function to our timer.
-	// Set alarm to call onTimer function every second (value in microseconds).
-	// Repeat the alarm (third parameter) with unlimited count = 0 (fourth parameter).
-	timerAlarm(timer, 10000, true, 0);
-	Serial.println("Timer set up");
-	Serial.println("Starting Wire");
-	Wire.begin(ADDRESS);
-	Wire.onReceive(receiveEvent);
-	Serial.println("Wire started");
+	timerSemaphore = xSemaphoreCreateBinary();
+
+	// Use timer 0, 80 divider for 1MHz frequency, count up
+	timer = timerBegin(0, 80, true);
+
+	// Attach onTimer function to our timer with edge type interrupt
+	timerAttachInterrupt(timer, &onTimer, true);
+
+	// Set alarm to call onTimer function every 10000 microseconds (10ms)
+	// Repeat the alarm (third parameter)
+	timerAlarmWrite(timer, 10000, true);
+
+	// Start the timer
+	timerAlarmEnable(timer);
 }
 
 int map_throttle(int throttle)
@@ -311,7 +333,7 @@ void loop()
 
 	updateThrottleRegister();
 
-	portEXIT_CRITICAL(&timerMux);
+	//portEXIT_CRITICAL(&timerMux);
 	delay(100);
 }
 
