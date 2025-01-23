@@ -40,8 +40,8 @@ Pinout
 Type connector: ???
 
 ## Commands
-Serial and I2C Interface
-(default address i2c = 0x40)
+Serial and I2C Interface  
+(default address i2c = 0x40)  
 `S [motor] [speed]`: Set motor speed (0-???)  
 `A [rate]`: Set acceleration rate  
 `D [0/1]`: Toggle demo mode  
