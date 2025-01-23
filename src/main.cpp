@@ -19,8 +19,12 @@ DShotESC esc0;
 DShotESC esc1;
 DShotESC esc2;
 DShotESC esc3;
-DShotESC *escs[] = {&esc0, &esc1, &esc2, &esc3};
-const int NUM_MOTORS = 4;
+DShotESC esc4;
+DShotESC esc5;
+DShotESC esc6;
+DShotESC esc7;
+DShotESC *escs[] = {&esc0, &esc1, &esc2, &esc3, &esc4, &esc5, &esc6, &esc7};
+const int NUM_MOTORS = 8;
 
 #define PEAKSPEED 50
 #define MIN_THROTTLE 9
@@ -38,7 +42,7 @@ int last_print_time = 0;
 int print_rate = 500;
 
 
-const int address = 0x04;
+const int ADDRESS = 0x04;
 char input_buffer[10];
 
 /*
@@ -88,30 +92,36 @@ void emergencyStop() {
 
 void handle_wire_input() {
 	Serial.println("Handling input: " + String(input_buffer));
-	if(input_buffer[0] == 'S') { // Setting speedS 0 200
-
-		set_speed(input_buffer[1], input_buffer[2] * 256 + input_buffer[3]);
+	if(input_buffer[0] == 'S' || input_buffer[0] == 's') { 
+		uint8_t motor_id = input_buffer[2] * 256 + input_buffer[1];
+		uint16_t speed = input_buffer[4] * 256 + input_buffer[3];
+		Serial.println("Setting Speed. Motor " + String(motor_id) + ", speed " + String(speed));
+		set_speed(motor_id, speed);
 	}
-	else if(input_buffer[0] == 'A') { // Set acceleration
-		set_acceleration(input_buffer[1] * 256 + input_buffer[2]);
+	else if(input_buffer[0] == 'A' || input_buffer[0] == 'a') { // Set acceleration
+		uint16_t acceleration = input_buffer[2] * 256 + input_buffer[1];
+		Serial.println("Setting acceleration. Acceleration " + String(acceleration));
+		set_acceleration(acceleration);
 	}
-	else if(input_buffer[0] == 'D') {
-		set_demo_mode(input_buffer[1] == '1');
+	else if(input_buffer[0] == 'D' || input_buffer[0] == 'd') {
+		bool demo_mode = input_buffer[1] != 0;
+		Serial.println("Setting demo mode. Demo mode " + String(demo_mode));
+		set_demo_mode(demo_mode);
 	}
-	else if( input_buffer[0] == 'X') {
+	else if( input_buffer[0] == 'X' || input_buffer[0] == 'x') {
+		Serial.println("Emergency stop");
 		emergencyStop();
 	}
 }
 
 void receiveEvent(int howMany) {
+	Serial.println("Received Wire " + String(howMany) + " bytes");
   int i = 0;
   while(Wire.available()) {
     char c = Wire.read();
-    Serial.print(c);
     input_buffer[i] = c;
     i++;
   }
-  Serial.println("Received: " + String(input_buffer));
   handle_wire_input();
 }
 
@@ -211,6 +221,10 @@ void setup()
 	esc1.install(MOTOR_PINS[1], RMT_CHANNELS[1]);
 	esc2.install(MOTOR_PINS[2], RMT_CHANNELS[2]);
 	esc3.install(MOTOR_PINS[3], RMT_CHANNELS[3]);
+	esc4.install(MOTOR_PINS[4], RMT_CHANNELS[4]);
+	esc5.install(MOTOR_PINS[5], RMT_CHANNELS[5]);
+	esc6.install(MOTOR_PINS[6], RMT_CHANNELS[6]);
+	esc7.install(MOTOR_PINS[7], RMT_CHANNELS[7]);
 
 	/* This doesnt work! I don't know why. It should be the same...
 	   for(int i = 0; i < 4; i++) {
@@ -248,20 +262,18 @@ void setup()
 	}
  */
 	Serial.println("ESCs ready");
-	timerSemaphore = xSemaphoreCreateBinary();
-
-	// Use timer 0, 80 divider for 1MHz frequency, count up
-	timer = timerBegin(0, 80, true);
-
-	// Attach onTimer function to our timer with edge type interrupt
-	timerAttachInterrupt(timer, &onTimer, true);
-
-	// Set alarm to call onTimer function every 10000 microseconds (10ms)
-	// Repeat the alarm (third parameter)
-	timerAlarmWrite(timer, 10000, true);
-
-	// Start the timer
-	timerAlarmEnable(timer);
+	Serial.println("Setting up timer");
+	timerSemaphore = xSemaphoreCreateBinary(); // Create semaphore to inform us when the timer has fired
+	timer = timerBegin(1000000); // Set timer frequency to 1Mhz
+	timerAttachInterrupt(timer, &onTimer); // Attach onTimer function to our timer.
+	// Set alarm to call onTimer function every second (value in microseconds).
+	// Repeat the alarm (third parameter) with unlimited count = 0 (fourth parameter).
+	timerAlarm(timer, 10000, true, 0);
+	Serial.println("Timer set up");
+	Serial.println("Starting Wire");
+	Wire.begin(ADDRESS);
+	Wire.onReceive(receiveEvent);
+	Serial.println("Wire started");
 }
 
 int map_throttle(int throttle)
